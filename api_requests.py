@@ -1,70 +1,96 @@
 import requests
+import json
 import time
+import pandas as pd
+from io import BytesIO
 import zipfile
 import io
-import pandas as pd
 
-# Pull in the API token, survey ID, and data center from a JSON file
-with open('qualtrics_access.json', 'r') as json_file:
-    data = json.load(json_file)
-    api_token = data['API Token']
-    survey_id = data['Survey ID']
-    data_center = data['User Datacenter ID']
 
-# Set the headers
-headers = {
-    "Content-Type": "application/json",
-    "X-API-TOKEN": api_token
-}
+def get_auth():
+    with open('qualtrics_access.json', 'r') as json_file:
+        data = json.load(json_file)
+    return data['API Token'], data['Survey ID'], data['User Datacenter ID']
 
-# Step 1: Start the Export Job
-export_url = f"https://{data_center}/API/v3/surveys/{survey_id}/export-responses"
-payload = {
-    "format": "json"
-}
-
-response = requests.post(export_url, json=payload, headers=headers)
-response_json = response.json()
-if response.status_code != 200:
-    print(f"Error: {response_json}")
-    exit()
-
-progress_id = response_json['result']['progressId']
-
-# Step 2: Check Export Job Progress
-progress_url = f"https://{data_center}/API/v3/surveys/{survey_id}/export-responses/{progress_id}"
-
-while True:
-    response = requests.get(progress_url, headers=headers)
-    response_json = response.json()
+def make_request(api_token, survey_id, data_center):
+    export_url = f"https://{data_center}.qualtrics.com/API/v3/surveys/{survey_id}/export-responses"
     
-    if response.status_code != 200:
-        print(f"Error: {response_json}")
-        exit()
+    headers = {
+        "Content-Type": "application/json",
+        "X-API-TOKEN": api_token
+    }
     
-    status = response_json['result']['status']
-    if status == 'complete':
-        file_id = response_json['result']['fileId']
-        break
-    elif status == 'failed':
-        print(f"Export job failed: {response_json}")
-        exit()
+    payload = {
+        "format": "json"
+    }
     
-    time.sleep(1)  # Wait for 1 second before checking again
+    try:
+        response = requests.post(export_url, json=payload, headers=headers)
+        response.raise_for_status()
+        response_data = response.json()
+        progress_id = response_data['result']['progressId']
+        
+        # Check the progress
+        progress_url = f"https://{data_center}.qualtrics.com/API/v3/surveys/{survey_id}/export-responses/{progress_id}"
+        while True:
+            response = requests.get(progress_url, headers=headers)
+            response.raise_for_status()
+            progress_data = response.json()
+            status = progress_data['result']['status']
+            if status == 'complete':
+                file_id = progress_data['result']['fileId']
+                break
+            elif status == 'failed':
+                print("Export failed")
+                return None
+            else:
+                print("Export in progress...")
+                time.sleep(5)
+        
+        # Download the file
+        download_url = f"https://{data_center}.qualtrics.com/API/v3/surveys/{survey_id}/export-responses/{file_id}/file"
+        response = requests.get(download_url, headers=headers)
+        response.raise_for_status()
+        return response.content
+    except requests.exceptions.RequestException as e:
+        print(f"An error occurred: {e}")
+        return None
 
-# Step 3: Download the Data File
-download_url = f"https://{data_center}/API/v3/surveys/{survey_id}/export-responses/{file_id}/file"
-response = requests.get(download_url, headers=headers)
+def retrieve_data():
+    api_token, survey_id, data_center = get_auth()
+    data = make_request(api_token, survey_id, data_center)
+    if data:
+        # Decompress the ZIP file
+        with zipfile.ZipFile(io.BytesIO(data), 'r') as zip_ref:
+            # Assuming there is only one file in the ZIP
+            file_name = zip_ref.namelist()[0]
+            with zip_ref.open(file_name) as json_file:
+                json_data = json_file.read()
+                data_dict = json.loads(json_data)
+                
+                '''
+                # Convert JSON data to DataFrame
+                if isinstance(data_dict, list):
+                    df = pd.json_normalize(data_dict)
+                else:
+                    df = pd.json_normalize([data_dict])
+                
+                # Print the DataFrame
+                print(df.head())
+                '''
 
-if response.status_code != 200:
-    print(f"Error: {response.json()}")
-    exit()
+                # Path to the JSON file
+                json_file_path = 'data.json'
 
-# Unzip the file and read the JSON data
-with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-    for filename in z.namelist():
-        with z.open(filename) as f:
-            data = pd.read_json(f)
-            print(data.head())  # Display the first few rows of the dataframe
+                # Save the dictionary to the JSON file
+                with open(json_file_path, 'w', encoding='utf-8') as f:
+                    json.dump(data_dict, f, indent=4)
 
-# Now the data in a pandas dataframe and can process it as needed
+                print("Data export successful!")
+
+                return data_dict
+
+
+
+if __name__ == "__main__":
+    retrieve_data()
